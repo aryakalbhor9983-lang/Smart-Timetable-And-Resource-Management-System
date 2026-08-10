@@ -1,0 +1,1260 @@
+<?php
+session_start();
+
+$conn = new mysqli(
+    "sql209.infinityfree.com",
+    "if0_42102472",
+    "qfHgzrTdk9BM",
+    "if0_42102472_university_timetable"
+);
+if ($conn->connect_error) die("Database connection failed: " . $conn->connect_error);
+
+function e($v){ return htmlspecialchars($v ?? '', ENT_QUOTES); }
+function table_exists($conn, $table){
+    $safe = $conn->real_escape_string($table);
+    $res = @$conn->query("SHOW TABLES LIKE '$safe'");
+    return $res && $res->num_rows > 0;
+}
+function column_exists($conn, $table, $column){
+    $safeTable = $conn->real_escape_string($table);
+    $safeCol = $conn->real_escape_string($column);
+    $res = @$conn->query("SHOW COLUMNS FROM `$safeTable` LIKE '$safeCol'");
+    return $res && $res->num_rows > 0;
+}
+function ensure_column($conn, $table, $column, $definition){
+    if(table_exists($conn, $table) && !column_exists($conn, $table, $column)){
+        @$conn->query("ALTER TABLE `$table` ADD COLUMN `$column` $definition");
+    }
+}
+function q1($conn, $sql, $default=''){
+    $res = @$conn->query($sql);
+    if(!$res) return $default;
+    $row = $res->fetch_assoc();
+    if(!$row) return $default;
+    return array_values($row)[0] ?? $default;
+}
+function normalize_semester($sem){
+    $sem = trim((string)$sem);
+    if($sem === 'Sem-I' || $sem === 'Sem 1' || $sem === 'Semester I' || $sem === '1') return 'Odd';
+    if($sem === 'Sem-II' || $sem === 'Sem 2' || $sem === 'Semester II' || $sem === '2') return 'Even';
+    if($sem === '') return 'Odd';
+    return $sem;
+}
+function format_wef_date_display($dateValue){
+    $dateValue = trim((string)$dateValue);
+    if($dateValue === '') return '';
+    $ts = strtotime($dateValue);
+    if($ts === false) return $dateValue;
+    return date('jS F Y', $ts);
+}
+function subject_class_for_display($code, $name='', $type=''){
+    $code = strtoupper(trim((string)$code));
+    $name = strtoupper(trim((string)$name));
+    $type = strtoupper(trim((string)$type));
+    $combo = $code.' '.$name.' '.$type;
+
+    if(strpos($combo,'PBL') !== false || strpos($combo,'PROJECT') !== false || strpos($combo,'REVIEW') !== false || strpos($combo,'MPP') !== false){
+        return 'project';
+    }
+    if($type === 'PRACTICAL' || strpos($combo,'LAB') !== false || preg_match('/(L$|DSL|DMSL|PAIL|EEL|PLL|AIMLL|DLNNL|HPCL|BDAL|VAPTL|SOSL|BTL|ADAL|DAPPDL|FSDL|IDSL|IOTAL|ITML|DMAL|EDAL|CDEL|CFDL|CFL|DCL|DLECL|DSSL|MCAL|PP|APP|JP)/', $code)){
+        return 'practical';
+    }
+    if($type === 'OTHER' || in_array($code, ['LIBRARY','MENTOR','MOOC','NPTEL','EXPERT','EXPERT SESSION','SCIL','SCIL-APT','SCIL-PS','REMEDIAL','TRAINING & PLACEMENT ACTIVITY'])){
+        return 'other';
+    }
+    return '';
+}
+function clean_subject_for_legend($code, $name=''){
+    $code = trim((string)$code);
+    $name = trim((string)$name);
+    $uCode = strtoupper($code);
+    $uName = strtoupper($name);
+    if($code === '' || $name === '') return false;
+    if($uCode === $uName) return false;
+    if(in_array($uCode, ['A','B','ONLINE','NULL','NONE','NAN','LIBRARY','MEETING','MENTOR','BREAK','SHORT BREAK','LUNCH BREAK','PREPARED BY','CHECKED BY','RECOMMENDED BY','APPROVED BY'])) return false;
+    if(preg_match('/^[NS][0-9]{3,4}$/', $uCode)) return false;
+    if(strpos($uCode, 'WEEK') !== false || strpos($uName, 'WEEK') !== false) return false;
+    return true;
+}
+function clean_faculty_for_legend($code, $name=''){
+    $code = trim((string)$code);
+    $name = trim((string)$name);
+    $uCode = strtoupper($code);
+    $uName = strtoupper($name);
+    if($code === '' || $name === '') return false;
+    if($uCode === $uName) return false;
+    if(in_array($uCode, ['ONLINE','NULL','NONE','NAN','PREPARED BY','CHECKED BY','RECOMMENDED BY','APPROVED BY'])) return false;
+    if(preg_match('/^[NS][0-9]{3,4}$/', $uCode)) return false;
+    if(strpos($uCode, 'PM') !== false || strpos($uCode, 'WEEK') !== false) return false;
+    return true;
+}
+
+ensure_column($conn, 'timetable_settings', 'prepared_by', "VARCHAR(150) NULL");
+ensure_column($conn, 'timetable_settings', 'prepared_by_designation', "VARCHAR(150) NULL");
+if(table_exists($conn, 'timetable_entries') && column_exists($conn, 'timetable_entries', 'semester')){
+    @$conn->query("UPDATE timetable_entries SET semester='Odd' WHERE semester=CONCAT('Sem','-I')");
+    @$conn->query("UPDATE timetable_entries SET semester='Even' WHERE semester=CONCAT('Sem','-II')");
+}
+if(table_exists($conn, 'timetable_signatures') && column_exists($conn, 'timetable_signatures', 'semester')){
+    @$conn->query("UPDATE timetable_signatures SET semester='Odd' WHERE semester=CONCAT('Sem','-I')");
+    @$conn->query("UPDATE timetable_signatures SET semester='Even' WHERE semester=CONCAT('Sem','-II')");
+}
+
+$days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+$slots = [
+    "08:45-09:40","09:40-10:35","10:35-10:50","10:50-11:45","11:45-12:40",
+    "12:40-01:40","01:40-02:35","02:35-03:30","03:30-03:40","03:40-04:30"
+];
+$break_slots = [
+    "10:35-10:50" => "SHORT BREAK",
+    "12:40-01:40" => "LUNCH BREAK",
+    "03:30-03:40" => "SHORT BREAK"
+];
+
+$view_type = $_GET['view_type'] ?? 'division';
+if(!in_array($view_type, ['division','faculty','physical_resource','classroom'])) $view_type = 'division';
+if($view_type === 'classroom') $view_type = 'physical_resource';
+
+$academic_year = $_GET['academic_year'] ?? '2025-26';
+$semester = normalize_semester($_GET['semester'] ?? 'Odd');
+
+$department = $_GET['department'] ?? '';
+$program_level = $_GET['program_level'] ?? '';
+$degree_type = $_GET['degree_type'] ?? '';
+$year_name = $_GET['year_name'] ?? '';
+$specialization = $_GET['specialization'] ?? '';
+$division_group = $_GET['group'] ?? 'ALL';
+$resource_type = $_GET['resource_type'] ?? 'classroom';
+if(!in_array($resource_type, ['all','classroom','lab','tutorial'])) $resource_type = 'classroom';
+
+function option_list($conn, $sql, $field){
+    $out = [];
+    $res = @$conn->query($sql);
+    if($res){
+        while($row = $res->fetch_assoc()){
+            $v = trim((string)($row[$field] ?? ''));
+            if($v !== '' && !in_array($v, $out)) $out[] = $v;
+        }
+    }
+    return $out;
+}
+function division_natural_order_sql(){
+    return "ORDER BY
+        CASE
+            WHEN division_name LIKE 'FY%' THEN 1
+            WHEN division_name LIKE 'SY%' THEN 2
+            WHEN division_name LIKE 'TY%' THEN 3
+            WHEN division_name LIKE 'LY%' THEN 4
+            ELSE 5
+        END,
+        CAST(
+            REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(division_name,'FY',''),'SY',''),'TY',''),'LY',''),' ',''),'-','') AS UNSIGNED
+        ),
+        division_name";
+}
+function get_items($conn, $view_type, $filters){
+    if($view_type === 'division'){
+        $where = ["1=1"];
+
+        if($filters['department'] !== '' && column_exists($conn,'divisions','department')){
+            $where[] = "department='".$conn->real_escape_string($filters['department'])."'";
+        }
+        if($filters['program_level'] !== '' && column_exists($conn,'divisions','program_level')){
+            $where[] = "program_level='".$conn->real_escape_string($filters['program_level'])."'";
+        }
+        if($filters['degree_type'] !== '' && column_exists($conn,'divisions','degree_type')){
+            $where[] = "degree_type='".$conn->real_escape_string($filters['degree_type'])."'";
+        }
+        if($filters['year_name'] !== '' && column_exists($conn,'divisions','year_name')){
+            $where[] = "year_name='".$conn->real_escape_string($filters['year_name'])."'";
+        }
+        if($filters['specialization'] !== '' && column_exists($conn,'divisions','specialization')){
+            $where[] = "specialization='".$conn->real_escape_string($filters['specialization'])."'";
+        }
+        if($filters['group'] !== '' && $filters['group'] !== 'ALL'){
+            $safe = $conn->real_escape_string($filters['group']);
+            $where[] = "division_name LIKE '{$safe}%'";
+        }
+
+        $sql = "SELECT division_name AS item FROM divisions WHERE ".implode(" AND ", $where)." ".division_natural_order_sql();
+    } elseif($view_type === 'faculty'){
+        $where = ["faculty_code IS NOT NULL", "faculty_code!=''"];
+        if(column_exists($conn,'faculties','is_active')) $where[] = "(is_active IS NULL OR is_active='' OR is_active='Y')";
+        $where[] = "faculty_code NOT IN ('ABBREVIATION','NULL','NONE','NAN')";
+        $sql = "SELECT faculty_code AS item FROM faculties WHERE ".implode(" AND ", $where)." ORDER BY faculty_code";
+    } else {
+        $where = ["room_code IS NOT NULL", "room_code!=''"];
+        if(column_exists($conn,'classrooms','resource_type') && $filters['resource_type'] !== 'all'){
+            $rt = $conn->real_escape_string($filters['resource_type']);
+            if($rt === 'tutorial'){
+                $where[] = "(LOWER(resource_type) IN ('tutorial','tut','tutorial room','tut room') OR UPPER(room_code) LIKE 'TUT%')";
+            } else {
+                $where[] = "LOWER(resource_type)=LOWER('$rt')";
+            }
+        }
+        $sql = "SELECT room_code AS item FROM classrooms WHERE ".implode(" AND ", $where)." ORDER BY room_code";
+    }
+
+    return @$conn->query($sql);
+}
+function fetch_timetable($conn, $view_type, $item, $academic_year, $semester){
+    $ay = $academic_year;
+    $sem = normalize_semester($semester);
+
+    if($view_type === 'division'){
+        $classTeacherJoin = table_exists($conn,'class_teacher_assignments') ? "
+            LEFT JOIN class_teacher_assignments cta
+              ON cta.division_id=d.id AND cta.academic_year=t.academic_year AND cta.semester=t.semester
+        " : "";
+        $settingsJoin = table_exists($conn,'timetable_settings') ? "
+            LEFT JOIN timetable_settings ts
+              ON ts.division_id=d.id AND ts.academic_year=t.academic_year AND ts.semester=t.semester
+        " : "";
+
+        $hasCtaTable = table_exists($conn,'class_teacher_assignments');
+        $hasCtaEmail = $hasCtaTable && column_exists($conn,'class_teacher_assignments','class_teacher_email');
+        $hasCtaContact = $hasCtaTable && column_exists($conn,'class_teacher_assignments','class_teacher_contact');
+        $hasDivEmail = column_exists($conn,'divisions','class_teacher_email');
+        $hasDivContact = column_exists($conn,'divisions','class_teacher_contact');
+
+        $classTeacherSelect = $hasCtaTable ? "COALESCE(cta.class_teacher,d.class_teacher) AS class_teacher," : "d.class_teacher,";
+        if($hasCtaEmail && $hasDivEmail){
+            $classTeacherSelect .= " COALESCE(cta.class_teacher_email,d.class_teacher_email) AS class_teacher_email,";
+        } elseif($hasCtaEmail){
+            $classTeacherSelect .= " cta.class_teacher_email AS class_teacher_email,";
+        } elseif($hasDivEmail){
+            $classTeacherSelect .= " d.class_teacher_email AS class_teacher_email,";
+        } else {
+            $classTeacherSelect .= " '' AS class_teacher_email,";
+        }
+
+        if($hasCtaContact && $hasDivContact){
+            $classTeacherSelect .= " COALESCE(cta.class_teacher_contact,d.class_teacher_contact) AS class_teacher_contact,";
+        } elseif($hasCtaContact){
+            $classTeacherSelect .= " cta.class_teacher_contact AS class_teacher_contact,";
+        } elseif($hasDivContact){
+            $classTeacherSelect .= " d.class_teacher_contact AS class_teacher_contact,";
+        } else {
+            $classTeacherSelect .= " '' AS class_teacher_contact,";
+        }
+        $wefSelect = table_exists($conn,'timetable_settings') ? "COALESCE(ts.wef_date,d.wef_date) AS wef_date, ts.prepared_by, ts.prepared_by_designation," : "d.wef_date, '' AS prepared_by, '' AS prepared_by_designation,";
+
+        $sql = "SELECT
+                    t.id,
+                    d.id AS division_id,
+                    d.division_name,
+                    $classTeacherSelect
+                    d.specialization,
+                    d.department,
+                    d.program_level,
+                    d.degree_type,
+                    d.year_name,
+                    $wefSelect
+                    t.day_name,
+                    t.time_slot,
+                    s.subject_code,
+                    s.subject_name,
+                    ".(column_exists($conn,'subjects','subject_type') ? "s.subject_type" : "'' AS subject_type").",
+                    f.faculty_code,
+                    f.faculty_name,
+                    c.room_code,
+                    t.batch
+                FROM timetable_entries t
+                JOIN divisions d ON t.division_id=d.id
+                JOIN subjects s ON t.subject_id=s.id
+                LEFT JOIN faculties f ON t.faculty_id=f.id
+                LEFT JOIN classrooms c ON t.classroom_id=c.id
+                $classTeacherJoin
+                $settingsJoin
+                WHERE d.division_name=?
+                AND t.academic_year=?
+                AND t.semester=?
+                ORDER BY FIELD(t.day_name,'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'), t.time_slot";
+    } elseif($view_type === 'faculty'){
+        $sql = "SELECT
+                    t.id,
+                    d.id AS division_id,
+                    d.division_name,
+                    d.department,
+                    d.specialization,
+                    t.day_name,
+                    t.time_slot,
+                    s.subject_code,
+                    s.subject_name,
+                    ".(column_exists($conn,'subjects','subject_type') ? "s.subject_type" : "'' AS subject_type").",
+                    f.faculty_code,
+                    f.faculty_name,
+                    c.room_code,
+                    t.batch
+                FROM timetable_entries t
+                JOIN faculties f ON t.faculty_id=f.id
+                JOIN divisions d ON t.division_id=d.id
+                JOIN subjects s ON t.subject_id=s.id
+                LEFT JOIN classrooms c ON t.classroom_id=c.id
+                WHERE f.faculty_code=?
+                AND t.academic_year=?
+                AND t.semester=?
+                ORDER BY FIELD(t.day_name,'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'), t.time_slot";
+    } else {
+        $sql = "SELECT
+                    MIN(t.id) AS id,
+                    GROUP_CONCAT(DISTINCT d.division_name ORDER BY d.division_name SEPARATOR ', ') AS division_name,
+                    d.department,
+                    d.specialization,
+                    t.day_name,
+                    t.time_slot,
+                    s.subject_code,
+                    s.subject_name,
+                    ".(column_exists($conn,'subjects','subject_type') ? "s.subject_type" : "'' AS subject_type").",
+                    f.faculty_code,
+                    f.faculty_name,
+                    c.room_code,
+                    GROUP_CONCAT(DISTINCT t.batch ORDER BY t.batch SEPARATOR ', ') AS batch
+                FROM timetable_entries t
+                JOIN classrooms c ON t.classroom_id=c.id
+                JOIN divisions d ON t.division_id=d.id
+                JOIN subjects s ON t.subject_id=s.id
+                LEFT JOIN faculties f ON t.faculty_id=f.id
+                WHERE c.room_code=?
+                AND t.academic_year=?
+                AND t.semester=?
+                GROUP BY d.department,d.specialization,t.day_name,t.time_slot,s.subject_code,s.subject_name,s.subject_type,f.faculty_code,f.faculty_name,c.room_code
+                ORDER BY FIELD(t.day_name,'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'), t.time_slot";
+    }
+
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param("sss", $item, $ay, $sem);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    $timetable = [];
+    $meta = [];
+    while($row = $res->fetch_assoc()){
+        $timetable[$row['day_name']][$row['time_slot']][] = $row;
+        if(!$meta) $meta = $row;
+    }
+    return [$timetable, $meta];
+}
+function get_signature_rows($conn, $academic_year, $semester, $department='', $specialization=''){
+    $defaults = [
+        'PREPARED BY' => ['person_name'=>'', 'designation'=>'Dept. Timetable Coordinator', 'digital_signature_path'=>''],
+        'CHECKED BY' => ['person_name'=>'', 'designation'=>'Chief Timetable Coordinator', 'digital_signature_path'=>''],
+        'RECOMMENDED BY' => ['person_name'=>'', 'designation'=>'Associate Dean (Academics)', 'digital_signature_path'=>''],
+        'APPROVED BY' => ['person_name'=>'', 'designation'=>'Dean', 'digital_signature_path'=>'']
+    ];
+
+    if(!table_exists($conn,'timetable_signatures')) return $defaults;
+
+    $ay = $conn->real_escape_string($academic_year);
+    $sem = $conn->real_escape_string(normalize_semester($semester));
+    $dept = $conn->real_escape_string($department ?: 'GENERAL');
+    $spec = $conn->real_escape_string($specialization ?: 'GENERAL');
+
+    $digCol = column_exists($conn,'timetable_signatures','digital_signature_path') ? "digital_signature_path" : "'' AS digital_signature_path";
+
+    $sql = "
+        SELECT role_name, person_name, designation, $digCol, department_name, specialization
+        FROM timetable_signatures
+        WHERE academic_year='$ay' AND semester='$sem'
+          AND (department_name='$dept' OR department_name='GENERAL' OR department_name='' OR department_name IS NULL)
+          AND (specialization='$spec' OR specialization='GENERAL' OR specialization='' OR specialization IS NULL)
+        ORDER BY
+          CASE WHEN department_name='$dept' AND specialization='$spec' THEN 1
+               WHEN department_name='$dept' THEN 2
+               WHEN department_name='GENERAL' THEN 3
+               ELSE 4 END,
+          display_order, id
+    ";
+    $res = @$conn->query($sql);
+    if($res){
+        while($r = $res->fetch_assoc()){
+            $role = strtoupper(trim((string)$r['role_name']));
+            if(isset($defaults[$role])){
+                if(trim((string)$r['person_name']) !== '' || trim((string)$r['designation']) !== '' || trim((string)$r['digital_signature_path']) !== ''){
+                    $defaults[$role] = [
+                        'person_name' => $r['person_name'] ?? '',
+                        'designation' => $r['designation'] ?? '',
+                        'digital_signature_path' => $r['digital_signature_path'] ?? ''
+                    ];
+                }
+            }
+        }
+    }
+    return $defaults;
+}
+function render_division_footer($timetable){
+    $legend_rows = [];
+    foreach($timetable as $slotArr){
+        foreach($slotArr as $entries){
+            foreach($entries as $entry){
+                $sc = trim($entry['subject_code'] ?? '');
+                $sn = trim($entry['subject_name'] ?? '');
+                $fc = trim($entry['faculty_code'] ?? '');
+                $fn = trim($entry['faculty_name'] ?? '');
+                if(!clean_subject_for_legend($sc, $sn)) continue;
+
+                if(!isset($legend_rows[$sc])){
+                    $legend_rows[$sc] = [
+                        'subject_name' => $sn ?: $sc,
+                        'subject_code' => $sc,
+                        'faculty_names' => [],
+                        'faculty_codes' => []
+                    ];
+                }
+
+                if(clean_faculty_for_legend($fc, $fn)){
+                    $legend_rows[$sc]['faculty_names'][$fc] = $fn ?: $fc;
+                    $legend_rows[$sc]['faculty_codes'][$fc] = $fc;
+                }
+            }
+        }
+    }
+
+    if(empty($legend_rows)) return;
+
+    echo '<table class="legend-table">';
+    echo '<tr><th>Name of the Course</th><th>Abbreviation</th><th>Name of the Faculty</th><th>Abbreviation</th></tr>';
+    foreach($legend_rows as $row){
+        echo '<tr>';
+        echo '<td>'.e($row['subject_name']).'</td>';
+        echo '<td class="legend-code">'.e($row['subject_code']).'</td>';
+        echo '<td>'.e(implode(", ", array_values($row['faculty_names']))).'</td>';
+        echo '<td class="legend-code">'.e(implode(", ", array_values($row['faculty_codes']))).'</td>';
+        echo '</tr>';
+    }
+    echo '</table>';
+}
+function render_signature_footer($conn, $academic_year, $semester, $department, $specialization, $preparedBy='', $preparedDesignation='Dept. Timetable Coordinator'){
+    $rows = get_signature_rows($conn, $academic_year, $semester, $department, $specialization);
+
+    if(trim((string)$preparedBy) !== ''){
+        $rows['PREPARED BY']['person_name'] = $preparedBy;
+        if(trim((string)$preparedDesignation) !== '') $rows['PREPARED BY']['designation'] = $preparedDesignation;
+    }
+
+    $roles = ['PREPARED BY','CHECKED BY','RECOMMENDED BY','APPROVED BY'];
+
+    echo '<table class="sign-table">';
+    echo '<tr>';
+    foreach($roles as $role) echo '<th>'.e($role).'</th>';
+    echo '</tr>';
+
+    echo '<tr class="sign-image-row">';
+    foreach($roles as $role){
+        $path = trim((string)($rows[$role]['digital_signature_path'] ?? ''));
+        echo '<td class="sign-space">';
+        if($path !== ''){
+            echo '<img src="'.e($path).'" class="signature-img" alt="Signature">';
+        } else {
+            echo '&nbsp;';
+        }
+        echo '</td>';
+    }
+    echo '</tr>';
+
+    echo '<tr class="sign-name-row">';
+    foreach($roles as $role) echo '<td>'.e($rows[$role]['person_name'] ?? '').'</td>';
+    echo '</tr>';
+
+    echo '<tr class="sign-desig-row">';
+    foreach($roles as $role) echo '<td><b>'.e($rows[$role]['designation'] ?? '').'</b></td>';
+    echo '</tr>';
+    echo '</table>';
+}
+function render_timetable($conn, $view_type, $item, $academic_year, $semester, $days, $slots, $break_slots){
+    list($timetable, $meta) = fetch_timetable($conn, $view_type, $item, $academic_year, $semester);
+    if(empty($timetable)) return;
+
+    $dept = $meta['department'] ?? 'Computer Science & Engineering';
+    if($dept === 'CSE') $dept = 'Computer Science & Engineering';
+    if($dept === 'IT') $dept = 'Information Technology';
+    if($dept === 'ASH') $dept = 'Applied Sciences & Humanities';
+
+    $class_teacher = $meta['class_teacher'] ?? '';
+    $specialization = $meta['specialization'] ?? '';
+    $wef = format_wef_date_display($meta['wef_date'] ?? '');
+    if($wef === '') $wef = '1st August 2025';
+    $preparedBy = $meta['prepared_by'] ?? '';
+    $preparedDesignation = $meta['prepared_by_designation'] ?? 'Dept. Timetable Coordinator';
+
+    $titleLabel = $view_type === 'division' ? 'Class' : ($view_type === 'faculty' ? 'Faculty' : 'Physical Resource');
+
+    echo '<section class="tt-page">';
+    echo '<div class="tt-header">';
+    echo '<div class="tt-header-row">';
+    echo '<div class="tt-school">MIT SCHOOL OF COMPUTING</div>';
+    echo '<div class="tt-title">DEPARTMENTAL TIME TABLE</div>';
+    echo '</div>';
+    echo '<div class="tt-dept">'.e($dept).'</div>';
+    echo '<div class="tt-info">';
+    echo '<div><b>'.e($titleLabel).' :</b> <span class="highlight-pill">'.e($item).'</span>';
+    if($view_type === 'division' && $specialization !== '') echo '<br><span class="highlight-text">'.e($specialization).'</span>';
+    echo '</div>';
+    echo '<div><b>Academic Year :</b> <span class="highlight-pill teal">'.e($academic_year).'</span>, <span class="highlight-pill pink">'.e(normalize_semester($semester)).'</span></div>';
+    echo '<div><b>W.E.F.</b> <span class="highlight-pill yellow">'.e($wef).'</span></div>';
+    echo '</div>';
+
+    if($view_type === 'division'){
+        $classTeacherLine = trim((string)$class_teacher);
+        $classTeacherEmail = trim((string)($meta['class_teacher_email'] ?? ''));
+        $classTeacherContact = trim((string)($meta['class_teacher_contact'] ?? ''));
+        if($classTeacherLine === '') $classTeacherLine = '________________';
+        if($classTeacherEmail !== '') $classTeacherLine .= ' '.$classTeacherEmail;
+        if($classTeacherContact !== '') $classTeacherLine .= ' '.$classTeacherContact;
+        echo '<div class="tt-teacher">Name of the Class Teacher : '.e($classTeacherLine).'</div>';
+    }
+    echo '</div>';
+
+    echo '<table class="tt-table">';
+    echo '<colgroup><col class="tt-col-day">';
+    foreach($slots as $slot){
+        if(isset($break_slots[$slot])) echo '<col class="'.($slot === '12:40-01:40' ? 'tt-col-lunch' : 'tt-col-break').'">';
+        else echo '<col class="tt-col-main">';
+    }
+    echo '</colgroup>';
+
+    echo '<tr><th>Day ↓ / Time →</th>';
+    foreach($slots as $slot) echo '<th>'.e(str_replace('-', ' - ', $slot)).'</th>';
+    echo '</tr>';
+
+    foreach($days as $di => $day){
+        $isOnlineDay = false;
+        if($view_type === 'division'){
+            $hasAnyEntry = false;
+            $hasAnyRoom = false;
+            foreach(["08:45-09:40","09:40-10:35","10:50-11:45","11:45-12:40","01:40-02:35","02:35-03:30"] as $checkSlot){
+                if(isset($timetable[$day][$checkSlot])){
+                    foreach($timetable[$day][$checkSlot] as $entry){
+                        $hasAnyEntry = true;
+                        if(trim((string)($entry['room_code'] ?? '')) !== '') $hasAnyRoom = true;
+                    }
+                }
+            }
+            $isOnlineDay = ($hasAnyEntry && !$hasAnyRoom);
+        }
+
+        echo '<tr>';
+        echo '<td class="day '.($isOnlineDay ? 'online-day' : '').'">'.e($day).($isOnlineDay ? '<br>(Online)' : '').'</td>';
+
+        $skipNextSlot = false;
+        foreach($slots as $slotIndex => $slot){
+            if($skipNextSlot){ $skipNextSlot = false; continue; }
+
+            if(isset($break_slots[$slot])){
+                if($di === 0){
+                    $cls = ($slot === '12:40-01:40') ? 'lunch-common' : 'break-common';
+                    echo '<td rowspan="'.count($days).'" class="'.$cls.'">'.e($break_slots[$slot]).'</td>';
+                }
+                continue;
+            }
+
+            $colspan = 1;
+            $nextSlot = $slots[$slotIndex + 1] ?? '';
+            if($nextSlot !== '' && !isset($break_slots[$nextSlot]) && isset($timetable[$day][$slot]) && isset($timetable[$day][$nextSlot])){
+                $currentSignature = [];
+                foreach($timetable[$day][$slot] as $e){
+                    $currentSignature[] = trim((string)($e['subject_code'] ?? '')).'|'.trim((string)($e['faculty_code'] ?? '')).'|'.trim((string)($e['room_code'] ?? '')).'|'.trim((string)($e['batch'] ?? ''));
+                }
+                $nextSignature = [];
+                foreach($timetable[$day][$nextSlot] as $e){
+                    $nextSignature[] = trim((string)($e['subject_code'] ?? '')).'|'.trim((string)($e['faculty_code'] ?? '')).'|'.trim((string)($e['room_code'] ?? '')).'|'.trim((string)($e['batch'] ?? ''));
+                }
+                sort($currentSignature); sort($nextSignature);
+
+                $firstEntry = $timetable[$day][$slot][0] ?? [];
+                $subjectCode = strtoupper(trim((string)($firstEntry['subject_code'] ?? '')));
+                $subjectType = strtoupper(trim((string)($firstEntry['subject_type'] ?? '')));
+                $subjectName = strtoupper(trim((string)($firstEntry['subject_name'] ?? '')));
+
+                $mergeAllowed =
+                    $subjectType === 'PRACTICAL' ||
+                    strpos($subjectName, 'LAB') !== false ||
+                    preg_match('/(L$|DSL|DMSL|PAIL|EEL|PLL|AIMLL|DLNNL|HPCL|BDAL|VAPTL|SOSL|BTL|ADAL|DAPPDL|FSDL|IDSL|IOTAL|ITML|DMAL|EDAL|CDEL|CFDL|CFL|DCL|DLECL|DSSL|MCAL|PP|APP|JP)/', $subjectCode) ||
+                    strpos($subjectCode, 'PBL') !== false ||
+                    strpos($subjectCode, 'PAL') !== false ||
+                    strpos($subjectCode, 'SHD') !== false ||
+                    strpos($subjectCode, 'MDM') !== false ||
+                    in_array($subjectCode, ['LIBRARY','EXPERT','EXPERT SESSION','REMEDIAL','NPTEL','MOOC','MENTOR']);
+
+                if($mergeAllowed && $currentSignature === $nextSignature){
+                    $colspan = 2;
+                    $skipNextSlot = true;
+                }
+            }
+
+            echo '<td colspan="'.$colspan.'">';
+            if(isset($timetable[$day][$slot])){
+                $cellGroups = [];
+
+                foreach($timetable[$day][$slot] as $entry){
+                    $subject = trim((string)($entry['subject_code'] ?? ''));
+                    $subjectName = trim((string)($entry['subject_name'] ?? ''));
+                    $subjectType = trim((string)($entry['subject_type'] ?? ''));
+                    $faculty = trim((string)($entry['faculty_code'] ?? ''));
+                    $room = trim((string)($entry['room_code'] ?? ''));
+                    $batch = trim((string)($entry['batch'] ?? ''));
+                    $division = trim((string)($entry['division_name'] ?? ''));
+
+                    if(in_array(strtoupper($subject), ['A','B']) && $batch === ''){
+                        $batch = strtoupper($subject);
+                        $subject = $subjectName;
+                    }
+                    if($subject === '' && $subjectName !== '') $subject = $subjectName;
+                    if($subject === '') continue;
+
+                    $key = strtoupper($subject);
+                    if(!isset($cellGroups[$key])){
+                        $cellGroups[$key] = [
+                            'subject' => $subject,
+                            'subject_name' => $subjectName,
+                            'subject_type' => $subjectType,
+                            'class' => subject_class_for_display($subject, $subjectName, $subjectType),
+                            'entries' => []
+                        ];
+                    }
+
+                    $entryKey = ($batch !== '' ? $batch : '-') . '|' . $division . '|' . $faculty . '|' . $room;
+                    $cellGroups[$key]['entries'][$entryKey] = [
+                        'batch' => $batch,
+                        'division' => $division,
+                        'faculty' => $faculty,
+                        'room' => $room
+                    ];
+                }
+
+                foreach($cellGroups as $group){
+                    $entries = array_values($group['entries']);
+                    usort($entries, function($a,$b){
+                        $order = ['A'=>1,'B'=>2,'C'=>3,'D'=>4,''=>9];
+                        $oa = $order[strtoupper($a['batch'])] ?? 8;
+                        $ob = $order[strtoupper($b['batch'])] ?? 8;
+                        if($oa === $ob) return strcmp($a['faculty'].$a['division'], $b['faculty'].$b['division']);
+                        return $oa <=> $ob;
+                    });
+
+                    $textClass = $group['class'];
+                    echo '<div class="tt-card">';
+                    echo '<div class="tt-subject '.$textClass.'">'.e($group['subject']).'</div>';
+
+                    foreach($entries as $meta){
+                        $metaLine = '';
+                        if($meta['batch'] !== '') $metaLine .= $meta['batch'].': ';
+
+                        if($view_type === 'division'){
+                            if($meta['faculty'] !== '') $metaLine .= $meta['faculty'];
+                            if($meta['room'] !== '') $metaLine .= ($meta['faculty'] !== '' ? ' | ' : '') . $meta['room'];
+                        } elseif($view_type === 'faculty'){
+                            if($meta['division'] !== '') $metaLine .= $meta['division'];
+                            if($meta['room'] !== '') $metaLine .= ($meta['division'] !== '' ? ' | ' : '') . $meta['room'];
+                        } else {
+                            if($meta['division'] !== '') $metaLine .= $meta['division'];
+                            if($meta['faculty'] !== '') $metaLine .= ($meta['division'] !== '' ? ' | ' : '') . $meta['faculty'];
+                        }
+
+                        if(trim($metaLine) !== '') echo '<div class="tt-meta '.$textClass.'">'.e($metaLine).'</div>';
+                    }
+                    echo '</div>';
+                }
+            } else {
+                echo '<div class="tt-card">-</div>';
+            }
+            echo '</td>';
+        }
+        echo '</tr>';
+    }
+
+    echo '</table>';
+    if($view_type === 'division') render_division_footer($timetable);
+    render_signature_footer($conn, $academic_year, $semester, $meta['department'] ?? 'GENERAL', $specialization ?: 'GENERAL', $preparedBy, $preparedDesignation);
+    echo '</section>';
+}
+
+$filters = [
+    'department' => $department,
+    'program_level' => $program_level,
+    'degree_type' => $degree_type,
+    'year_name' => $year_name,
+    'specialization' => $specialization,
+    'group' => $division_group,
+    'resource_type' => $resource_type
+];
+
+$year_options = ['2025-26','2026-27','2027-28','2028-29'];
+$dbYears = option_list($conn, "SELECT DISTINCT academic_year FROM timetable_entries WHERE academic_year IS NOT NULL AND academic_year!='' ORDER BY academic_year", "academic_year");
+foreach($dbYears as $y){ if(!in_array($y,$year_options)) $year_options[]=$y; }
+
+$department_options = ['CSE','IT','ASH'];
+$dbDepartments = option_list($conn, "SELECT DISTINCT department FROM divisions WHERE department IS NOT NULL AND department!='' ORDER BY department", "department");
+foreach($dbDepartments as $d){ if(!in_array($d,$department_options)) $department_options[]=$d; }
+
+$program_options = ['UG','PG'];
+$dbPrograms = option_list($conn, "SELECT DISTINCT program_level FROM divisions WHERE program_level IS NOT NULL AND program_level!='' ORDER BY program_level", "program_level");
+foreach($dbPrograms as $p){ if(!in_array($p,$program_options)) $program_options[]=$p; }
+
+$degree_options = ['BTech','MTech','MSc'];
+$dbDegrees = option_list($conn, "SELECT DISTINCT degree_type FROM divisions WHERE degree_type IS NOT NULL AND degree_type!='' ORDER BY degree_type", "degree_type");
+foreach($dbDegrees as $d){ if(!in_array($d,$degree_options)) $degree_options[]=$d; }
+
+$year_name_options = ['FY','SY','TY','LY','PG Year 1','PG Year 2'];
+$dbYearNames = option_list($conn, "SELECT DISTINCT year_name FROM divisions WHERE year_name IS NOT NULL AND year_name!='' ORDER BY FIELD(year_name,'FY','SY','TY','LY','PG Year 1','PG Year 2'), year_name", "year_name");
+foreach($dbYearNames as $y){ if(!in_array($y,$year_name_options)) $year_name_options[]=$y; }
+
+$spec_options = ['CORE','AIA','AIEC','CC','BDCE','CSF','BT','DE','IT','DA','SMAD','ISA','AIML'];
+$dbSpecs = option_list($conn, "SELECT DISTINCT specialization FROM divisions WHERE specialization IS NOT NULL AND specialization!='' ORDER BY specialization", "specialization");
+foreach($dbSpecs as $s){ if(!in_array($s,$spec_options)) $spec_options[]=$s; }
+
+?>
+<!DOCTYPE html>
+<html>
+<head>
+<title>Bulk PDF Export</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f3eefb;margin:0;color:#000;}
+.no-print{padding:18px 22px;background:#fff;border-bottom:4px solid #7b2fb5;box-shadow:0 4px 16px rgba(90,31,140,.14);}
+.no-print b{font-size:20px;color:#3d0f6b;}
+.filter-grid{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px;}
+select,button{padding:10px 12px;border-radius:10px;border:1px solid #c997ee;margin:0;background:#fff;color:#1a0533;font-weight:700;}
+button{background:#7b2fb5;color:#fff;font-weight:900;cursor:pointer;border:0;}
+.print-btn{background:#c73364;}
+.back-link{margin-left:4px;color:#5a1f8c;font-weight:900;text-decoration:none;}
+.tt-page{background:#fff;border:1px solid #000;margin:18px auto;max-width:1280px;page-break-after:always;}
+.tt-header{text-align:center;border-bottom:1px solid #000;}
+.tt-header-row{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid #000;}
+.tt-school,.tt-title{font-weight:900;padding:6px;font-size:16px;background:#f9f4ff;}
+.tt-school{border-right:1px solid #000;}
+.tt-dept{color:#5a1f8c;font-weight:900;font-size:16px;padding:5px;border-bottom:1px solid #000;}
+.tt-info{display:grid;grid-template-columns:1fr 2fr 1.2fr;background:#ede0f7;border-bottom:1px solid #000;font-size:13px;font-weight:900;}
+.tt-info div{padding:5px;}
+.highlight-pill{display:inline-block;background:#ffe1ec;color:#c73364;border:1px solid #f7a7c2;border-radius:999px;padding:2px 8px;font-weight:900;}
+.highlight-pill.teal{background:#d7fff4;color:#00856b;border-color:#75d7c3;}
+.highlight-pill.pink{background:#ffe1ec;color:#c73364;border-color:#f7a7c2;}
+.highlight-pill.yellow{background:#fff2cc;color:#8a5a00;border-color:#ffd966;}
+.highlight-text{color:#5a1f8c;font-weight:900;}
+.tt-teacher{background:#3d0f6b;color:#fff;padding:6px;font-size:13px;font-weight:900;}
+.tt-table{width:100%;border-collapse:collapse;table-layout:fixed;}
+.tt-table th,.tt-table td{border:1px solid #000;text-align:center;vertical-align:middle;padding:3px;font-size:10px;}
+.tt-table td{height:48px;}
+.tt-table td[colspan="2"]{background:#faf7ff;}
+.day{font-weight:900;width:75px;background:#ede0f7;}
+.online-day{background:#ff00ff!important;color:#000!important;}
+.tt-card{font-size:9px;line-height:1.15;padding:1px;}
+.tt-subject{font-weight:900;color:#3d0f6b;}
+.tt-meta{font-size:8.5px;font-weight:700;line-height:1.05;white-space:nowrap;color:#5a1f8c;}
+.tt-subject.practical,.tt-meta.practical{color:#0b6b35!important;}
+.tt-subject.project,.tt-meta.project{color:#6d28d9!important;}
+.tt-subject.other,.tt-meta.other{color:#b45309!important;}
+.break-common,.lunch-common{font-weight:900;writing-mode:vertical-rl;text-orientation:upright;letter-spacing:2px;}
+.legend-table,.sign-table{width:100%;border-collapse:collapse;background:#fff;}
+.legend-table th,.legend-table td,.sign-table th,.sign-table td{border:1px solid #000;padding:3px;font-size:10px;color:#000;}
+.legend-table th,.sign-table th{background:#ede0f7;font-weight:900;}
+.legend-code{text-align:center;font-weight:900;}
+.sign-table{text-align:center;}
+.sign-space{height:35px;vertical-align:middle!important;}
+.signature-img{max-height:30px;max-width:120px;object-fit:contain;}
+.sign-name-row td{height:18px;font-weight:800;}
+.sign-desig-row td{height:18px;font-weight:900;}
+
+@media print {
+    @page {
+        size: A4 portrait;
+        margin: 4mm 8mm 4mm 8mm;
+    }
+
+    html, body {
+        overflow: visible !important;
+        height: auto !important;
+        width: 100% !important;
+        background: #fff !important;
+        font-size: 8pt !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .no-print {
+        display: none !important;
+    }
+
+    .tt-page {
+        width: 194mm !important;
+        max-width: none !important;
+        margin: 0 auto !important;
+        border: 1.1pt solid #222 !important;
+        border-radius: 0 !important;
+        overflow: visible !important;
+        page-break-after: always !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        display: block !important;
+        background: #fff !important;
+    }
+
+    /* Better spaced official header like normal Division TT print */
+    .tt-header {
+        border-bottom: 0.7pt solid #555 !important;
+        text-align: center !important;
+    }
+
+    .tt-header-row {
+        display: grid !important;
+        grid-template-columns: 1fr 1fr !important;
+        border-bottom: 0.7pt solid #555 !important;
+        min-height: 13mm !important;
+    }
+
+    .tt-school,
+    .tt-title {
+        font-size: 10.5pt !important;
+        font-weight: 700 !important;
+        padding: 4.5mm 2mm !important;
+        line-height: 1.25 !important;
+        text-align: center !important;
+        background: #f8f1ff !important;
+        color: #111 !important;
+        min-height: 13mm !important;
+        box-sizing: border-box !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .tt-school {
+        border-right: 0.7pt solid #555 !important;
+    }
+
+    .tt-dept {
+        font-size: 11pt !important;
+        font-weight: 700 !important;
+        color: #5a1f8c !important;
+        padding: 3.5mm 2mm !important;
+        min-height: 11mm !important;
+        line-height: 1.25 !important;
+        border-bottom: 0.7pt solid #555 !important;
+        text-align: center !important;
+        box-sizing: border-box !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .tt-info {
+        display: grid !important;
+        grid-template-columns: 1fr 2fr 1.2fr !important;
+        background: #ede0f7 !important;
+        border-bottom: 0.7pt solid #555 !important;
+        font-size: 8.8pt !important;
+        font-weight: 600 !important;
+        min-height: 12mm !important;
+        color: #111 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .tt-info div {
+        padding: 3mm 2mm !important;
+        line-height: 1.25 !important;
+        box-sizing: border-box !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        flex-wrap: wrap !important;
+        gap: 1mm !important;
+    }
+
+    .tt-info b {
+        font-weight: 700 !important;
+    }
+
+    .highlight-pill {
+        border-radius: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        background: transparent !important;
+        font-weight: 700 !important;
+        color: #111 !important;
+    }
+
+    .highlight-pill.teal,
+    .highlight-pill.pink,
+    .highlight-pill.yellow,
+    .highlight-text {
+        background: transparent !important;
+        border: 0 !important;
+        color: #111 !important;
+        font-weight: 700 !important;
+    }
+
+    .tt-teacher {
+        background: #3d0f6b !important;
+        color: #fff !important;
+        font-size: 8pt !important;
+        font-weight: 650 !important;
+        padding: 1.8mm 2mm !important;
+        line-height: 1.2 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .tt-table {
+        width: 100% !important;
+        table-layout: fixed !important;
+        border-collapse: collapse !important;
+        margin: 0 !important;
+    }
+
+    .tt-table th,
+    .tt-table td {
+        border: 0.55pt solid #555 !important;
+        text-align: center !important;
+        vertical-align: middle !important;
+        color: #111 !important;
+        box-sizing: border-box !important;
+    }
+
+    .tt-table th {
+        font-size: 6.7pt !important;
+        font-weight: 650 !important;
+        padding: 1.1mm 0.5mm !important;
+        line-height: 1.05 !important;
+        background: #f8f1ff !important;
+        height: 6.5mm !important;
+        white-space: normal !important;
+        overflow: hidden !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .tt-table td {
+        padding: 0.6mm 0.5mm !important;
+        height: 19.5mm !important;
+        min-height: 19.5mm !important;
+        max-height: 19.5mm !important;
+        overflow: hidden !important;
+        font-size: 7.2pt !important;
+        line-height: 1.08 !important;
+        font-weight: 500 !important;
+    }
+
+    .tt-table td[colspan="2"] {
+        background: #fff !important;
+    }
+
+    .tt-col-day {
+        width: 14mm !important;
+    }
+
+    .tt-col-main {
+        width: 10.7% !important;
+    }
+
+    .tt-col-break {
+        width: 4.1% !important;
+    }
+
+    .tt-col-lunch {
+        width: 4.6% !important;
+    }
+
+    .day {
+        width: 14mm !important;
+        font-size: 7.5pt !important;
+        font-weight: 650 !important;
+        background: #ede0f7 !important;
+        color: #111 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .break-common,
+    .lunch-common {
+        background: #fff !important;
+        font-weight: 650 !important;
+        writing-mode: vertical-rl !important;
+        text-orientation: upright !important;
+        letter-spacing: 0.4px !important;
+        font-size: 5.6pt !important;
+        line-height: 1 !important;
+        padding: 0 !important;
+        width: 7.5mm !important;
+        min-width: 7.5mm !important;
+        max-width: 7.5mm !important;
+        color: #111 !important;
+    }
+
+    .tt-card {
+        margin: 0 !important;
+        padding: 0 !important;
+        font-size: 7pt !important;
+        line-height: 1.08 !important;
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        overflow: hidden !important;
+        background: transparent !important;
+        font-weight: 500 !important;
+    }
+
+    .tt-card + .tt-card {
+        margin-top: 0.6mm !important;
+    }
+
+    .tt-subject {
+        margin: 0 !important;
+        padding: 0 !important;
+        font-size: 7.5pt !important;
+        line-height: 1.08 !important;
+        font-weight: 700 !important;
+        color: #111 !important;
+        background: transparent !important;
+        white-space: normal !important;
+        overflow: hidden !important;
+    }
+
+    .tt-meta {
+        margin: 0 !important;
+        padding: 0 !important;
+        font-size: 6.8pt !important;
+        line-height: 1.08 !important;
+        font-weight: 500 !important;
+        color: #222 !important;
+        white-space: normal !important;
+        overflow: hidden !important;
+    }
+
+    .tt-subject.practical,
+    .tt-meta.practical {
+        color: #08733a !important;
+        font-weight: 650 !important;
+    }
+
+    .tt-subject.project,
+    .tt-meta.project {
+        color: #6b21a8 !important;
+        font-weight: 650 !important;
+    }
+
+    .tt-subject.other,
+    .tt-meta.other {
+        color: #7a4b00 !important;
+        font-weight: 650 !important;
+    }
+
+    .online-day {
+        background: #ff00ff !important;
+        color: #000 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .legend-table {
+        width: 100% !important;
+        table-layout: fixed !important;
+        border-collapse: collapse !important;
+        margin: 0 !important;
+        background: #fff !important;
+    }
+
+    .legend-table th,
+    .legend-table td {
+        border: 0.55pt solid #555 !important;
+        padding: 0.7mm 1.2mm !important;
+        font-size: 7.1pt !important;
+        line-height: 1.1 !important;
+        color: #000 !important;
+        overflow: hidden !important;
+        vertical-align: middle !important;
+        font-weight: 500 !important;
+    }
+
+    .legend-table th {
+        background: #eadcf5 !important;
+        font-weight: 700 !important;
+        text-align: center !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .legend-code {
+        text-align: center !important;
+        font-weight: 700 !important;
+    }
+
+    .sign-table {
+        width: 100% !important;
+        table-layout: fixed !important;
+        border-collapse: collapse !important;
+        margin: 0 !important;
+        background: #fff !important;
+        text-align: center !important;
+    }
+
+    .sign-table th,
+    .sign-table td {
+        border: 0.55pt solid #555 !important;
+        color: #000 !important;
+        vertical-align: middle !important;
+        overflow: hidden !important;
+    }
+
+    .sign-table th {
+        background: #eadcf5 !important;
+        height: 6mm !important;
+        padding: 0.8mm 1mm !important;
+        font-size: 7.3pt !important;
+        line-height: 1.1 !important;
+        font-weight: 700 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    .sign-space,
+    .sign-table .sign-space {
+        height: 13mm !important;
+        max-height: 13mm !important;
+        padding: 0.8mm 1mm !important;
+        background: #fff !important;
+    }
+
+    .signature-img,
+    .sign-table .sign-space img {
+        max-height: 11mm !important;
+        max-width: 42mm !important;
+        object-fit: contain !important;
+    }
+
+    .sign-name-row td,
+    .sign-table .sign-name {
+        height: 5mm !important;
+        max-height: 5mm !important;
+        padding: 0.6mm 1mm !important;
+        font-size: 7.2pt !important;
+        line-height: 1.1 !important;
+        font-weight: 600 !important;
+    }
+
+    .sign-desig-row td,
+    .sign-table .sign-designation {
+        height: 6mm !important;
+        max-height: 6mm !important;
+        padding: 0.6mm 1mm !important;
+        font-size: 6.9pt !important;
+        line-height: 1.1 !important;
+        font-weight: 700 !important;
+    }
+
+    .tt-page,
+    .tt-table,
+    .legend-table,
+    .sign-table {
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+    }
+}
+
+</style>
+</head>
+<body>
+
+<div class="no-print">
+    <form method="GET">
+        <b>Bulk PDF Export</b>
+        <div class="filter-grid">
+            <select name="view_type" onchange="this.form.submit()">
+                <option value="division" <?= $view_type==='division'?'selected':'' ?>>Division Timetables</option>
+                <option value="faculty" <?= $view_type==='faculty'?'selected':'' ?>>Faculty Timetables</option>
+                <option value="physical_resource" <?= $view_type==='physical_resource'?'selected':'' ?>>Physical Resource Timetables</option>
+            </select>
+
+            <select name="academic_year">
+                <?php foreach($year_options as $y){ ?>
+                    <option value="<?= e($y) ?>" <?= $academic_year===$y?'selected':'' ?>><?= e($y) ?></option>
+                <?php } ?>
+            </select>
+
+            <select name="semester">
+                <option value="Odd" <?= $semester==='Odd'?'selected':'' ?>>Odd</option>
+                <option value="Even" <?= $semester==='Even'?'selected':'' ?>>Even</option>
+            </select>
+
+            <?php if($view_type === 'division'){ ?>
+                <select name="department">
+                    <option value="">All Departments</option>
+                    <?php foreach($department_options as $d){ ?>
+                        <option value="<?= e($d) ?>" <?= $department===$d?'selected':'' ?>><?= e($d) ?></option>
+                    <?php } ?>
+                </select>
+
+                <select name="program_level">
+                    <option value="">All Program Levels</option>
+                    <?php foreach($program_options as $p){ ?>
+                        <option value="<?= e($p) ?>" <?= $program_level===$p?'selected':'' ?>><?= e($p) ?></option>
+                    <?php } ?>
+                </select>
+
+                <select name="degree_type">
+                    <option value="">All Programs</option>
+                    <?php foreach($degree_options as $d){ ?>
+                        <option value="<?= e($d) ?>" <?= $degree_type===$d?'selected':'' ?>><?= e($d) ?></option>
+                    <?php } ?>
+                </select>
+
+                <select name="year_name">
+                    <option value="">All Years</option>
+                    <?php foreach($year_name_options as $y){ ?>
+                        <option value="<?= e($y) ?>" <?= $year_name===$y?'selected':'' ?>><?= e($y) ?></option>
+                    <?php } ?>
+                </select>
+
+                <select name="specialization">
+                    <option value="">All Specializations</option>
+                    <?php foreach($spec_options as $s){ ?>
+                        <option value="<?= e($s) ?>" <?= $specialization===$s?'selected':'' ?>><?= e($s) ?></option>
+                    <?php } ?>
+                </select>
+
+                <select name="group">
+                    <option value="ALL" <?= $division_group==='ALL'?'selected':'' ?>>All Divisions</option>
+                    <option value="FY" <?= $division_group==='FY'?'selected':'' ?>>FY</option>
+                    <option value="SY" <?= $division_group==='SY'?'selected':'' ?>>SY</option>
+                    <option value="TY" <?= $division_group==='TY'?'selected':'' ?>>TY</option>
+                    <option value="LY" <?= $division_group==='LY'?'selected':'' ?>>LY</option>
+                </select>
+            <?php } ?>
+
+            <?php if($view_type === 'physical_resource'){ ?>
+                <select name="resource_type">
+                    <option value="classroom" <?= $resource_type==='classroom'?'selected':'' ?>>Classrooms</option>
+                    <option value="lab" <?= $resource_type==='lab'?'selected':'' ?>>Labs</option>
+                    <option value="tutorial" <?= $resource_type==='tutorial'?'selected':'' ?>>Tutorial Rooms</option>
+                    <option value="all" <?= $resource_type==='all'?'selected':'' ?>>All Physical Resources</option>
+                </select>
+            <?php } ?>
+
+            <button type="submit">Generate</button>
+            <button type="button" class="print-btn" onclick="window.print()">Print / Save PDF</button>
+            <a href="index.php?view=admin_dashboard" class="back-link">Back</a>
+        </div>
+    </form>
+</div>
+
+<?php
+$items = get_items($conn, $view_type, $filters);
+$rendered = 0;
+
+if($items && $items->num_rows > 0){
+    while($row = $items->fetch_assoc()){
+        ob_start();
+        render_timetable($conn, $view_type, $row['item'], $academic_year, $semester, $days, $slots, $break_slots);
+        $html = ob_get_clean();
+        if(trim($html) !== ''){
+            echo $html;
+            $rendered++;
+        }
+    }
+}
+if($rendered === 0){
+    echo "<p style='padding:20px;font-weight:900;color:#5a1f8c;'>No timetable records found for the selected filters.</p>";
+}
+?>
+
+</body>
+</html>
