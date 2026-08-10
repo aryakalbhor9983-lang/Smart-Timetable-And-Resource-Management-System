@@ -1,0 +1,17 @@
+# Database credentials / configuration
+config.php
+db.php
+connection.php
+.env
+
+# Database backups
+*.sql
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Temporary files
+*.log
+*.tmp
